@@ -1,5 +1,9 @@
 # polymarket_wallet_research
 
+English overview:
+- Start with [PROJECT_SUMMARY.md](/Users/davidgasper/Downloads/polymarket_wallet_research/PROJECT_SUMMARY.md) for a professor- or investor-facing summary.
+- See [results/README.md](/Users/davidgasper/Downloads/polymarket_wallet_research/results/README.md) for the lightweight results bundle included in Git.
+
 `polymarket_wallet_research` 是一个仅供研究用途的 Python MVP，用于评估公开 Polymarket 钱包是否表现出可用于研究的预测能力，以及更适合采用：
 
 - `copy`：顺势跟随
