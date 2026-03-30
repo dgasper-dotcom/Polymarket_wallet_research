@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-wallet-research"
+version = "0.1.0"
+description = "Research-only Polymarket wallet behavior analysis toolkit built on public APIs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27,<1.0",
+  "pydantic>=2.7,<3.0",
+  "sqlalchemy>=2.0,<3.0",
+  "numpy>=1.26,<2.0",
+  "pandas>=2.2,<3.0",
+  "matplotlib>=3.8,<4.0",
+  "python-dotenv>=1.0,<2.0",
+  "tenacity>=8.2,<10.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.setuptools]
+include-package-data = true

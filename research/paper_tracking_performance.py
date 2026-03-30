@@ -1,0 +1,518 @@
+"""Performance tracking for the unified house paper portfolio."""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+from typing import Any
+import sys
+
+sys.modules.setdefault("pyarrow", None)
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from db.session import get_session
+from research.all_active_reevaluation import (
+    _load_price_history_chunked,
+    _lookup_latest_price_at_or_before,
+)
+from research.copy_follow_expiry import _build_terminal_lookup, load_markets_frame
+from research.costs import calculate_net_pnl, estimate_entry_only_cost
+from research.delay_analysis import _build_price_index, _to_epoch_seconds
+
+
+DEFAULT_CONSOLIDATED_DIR = "exports/manual_seed_paper_tracking/consolidated"
+DEFAULT_OUTPUT_DIR = "exports/manual_seed_paper_tracking/performance"
+
+
+def _read_csv(path: str | Path) -> pd.DataFrame:
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(csv_path)
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(path, index=False)
+    return path
+
+
+def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Reconstruct weighted-cost house positions from the consolidated signal tape."""
+
+    if tape.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    normalized = tape.copy()
+    normalized["first_ts"] = pd.to_datetime(normalized["first_ts"], utc=True, errors="coerce")
+    normalized["last_ts"] = pd.to_datetime(normalized["last_ts"], utc=True, errors="coerce")
+    normalized["trade_count"] = pd.to_numeric(normalized["trade_count"], errors="coerce").fillna(0).astype(int)
+    normalized["unique_wallet_count"] = (
+        pd.to_numeric(normalized["unique_wallet_count"], errors="coerce").fillna(0).astype(int)
+    )
+    normalized["total_notional_usdc"] = pd.to_numeric(
+        normalized["total_notional_usdc"], errors="coerce"
+    ).fillna(0.0)
+    normalized["avg_signal_price"] = pd.to_numeric(normalized["avg_signal_price"], errors="coerce")
+    normalized = normalized.sort_values(["first_ts", "cluster_id"]).reset_index(drop=True)
+
+    open_positions: dict[str, dict[str, Any]] = {}
+    closed_rows: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, Any]] = []
+
+    for row in normalized.to_dict(orient="records"):
+        action = str(row.get("action") or "")
+        token_id = str(row.get("token_id") or "")
+        price = row.get("avg_signal_price")
+        notional = float(row.get("total_notional_usdc") or 0.0)
+        contracts = None
+        if price is not None and pd.notna(price) and float(price) > 0:
+            contracts = notional / float(price)
+        support_wallets = set(json.loads(row.get("supporting_wallets") or "[]"))
+
+        if action == "open_long":
+            if contracts is None or contracts <= 0:
+                skipped_rows.append(
+                    {
+                        "cluster_id": row.get("cluster_id"),
+                        "action": action,
+                        "reason": "missing_open_price",
+                        "token_id": token_id,
+                        "market_id": row.get("market_id"),
+                        "event_title": row.get("event_title"),
+                        "outcome": row.get("outcome"),
+                    }
+                )
+                continue
+            entry_cost_unit = float(
+                estimate_entry_only_cost(pd.Series(row), entry_price=float(price))["total_cost"]
+            )
+            open_positions[token_id] = {
+                "house_position_id": str(row.get("cluster_id")),
+                "token_id": token_id,
+                "market_id": str(row.get("market_id") or ""),
+                "event_title": row.get("event_title") or "",
+                "outcome": row.get("outcome") or "",
+                "opened_at": row["first_ts"],
+                "last_signal_at": row["last_ts"],
+                "closed_at": pd.NaT,
+                "status": "open",
+                "opening_cluster_id": str(row.get("cluster_id") or ""),
+                "closing_cluster_id": "",
+                "signal_cluster_count": 1,
+                "reinforcement_count": 0,
+                "raw_trade_count": int(row.get("trade_count") or 0),
+                "supporting_wallet_count": len(support_wallets),
+                "supporting_wallets": support_wallets,
+                "entry_contracts": float(contracts),
+                "entry_notional_usdc": notional,
+                "weighted_avg_entry_price": float(price),
+                "entry_cost_total_usdc": entry_cost_unit * float(contracts),
+            }
+        elif action == "reinforce_long":
+            current = open_positions.get(token_id)
+            if current is None or contracts is None or contracts <= 0:
+                skipped_rows.append(
+                    {
+                        "cluster_id": row.get("cluster_id"),
+                        "action": action,
+                        "reason": "missing_parent_or_price",
+                        "token_id": token_id,
+                        "market_id": row.get("market_id"),
+                        "event_title": row.get("event_title"),
+                        "outcome": row.get("outcome"),
+                    }
+                )
+                continue
+            entry_cost_unit = float(
+                estimate_entry_only_cost(pd.Series(row), entry_price=float(price))["total_cost"]
+            )
+            total_contracts = float(current["entry_contracts"]) + float(contracts)
+            total_notional = float(current["entry_notional_usdc"]) + notional
+            current["entry_contracts"] = total_contracts
+            current["entry_notional_usdc"] = total_notional
+            current["weighted_avg_entry_price"] = total_notional / total_contracts if total_contracts > 0 else None
+            current["entry_cost_total_usdc"] = float(current["entry_cost_total_usdc"]) + (
+                entry_cost_unit * float(contracts)
+            )
+            current["last_signal_at"] = row["last_ts"]
+            current["signal_cluster_count"] = int(current["signal_cluster_count"]) + 1
+            current["reinforcement_count"] = int(current["reinforcement_count"]) + 1
+            current["raw_trade_count"] = int(current["raw_trade_count"]) + int(row.get("trade_count") or 0)
+            current["supporting_wallets"].update(support_wallets)
+            current["supporting_wallet_count"] = len(current["supporting_wallets"])
+        elif action == "close_long":
+            current = open_positions.get(token_id)
+            if current is None or price is None or pd.isna(price):
+                skipped_rows.append(
+                    {
+                        "cluster_id": row.get("cluster_id"),
+                        "action": action,
+                        "reason": "missing_parent_or_close_price",
+                        "token_id": token_id,
+                        "market_id": row.get("market_id"),
+                        "event_title": row.get("event_title"),
+                        "outcome": row.get("outcome"),
+                    }
+                )
+                continue
+            exit_price = float(price)
+            contracts_total = float(current["entry_contracts"])
+            entry_price = float(current["weighted_avg_entry_price"])
+            exit_cost_unit = float(
+                estimate_entry_only_cost(pd.Series(row), entry_price=exit_price)["total_cost"]
+            )
+            realized_raw_usdc = (exit_price - entry_price) * contracts_total
+            total_cost_usdc = float(current["entry_cost_total_usdc"]) + exit_cost_unit * contracts_total
+            realized_net_usdc = calculate_net_pnl(realized_raw_usdc, total_cost_usdc)
+
+            current["closed_at"] = row["first_ts"]
+            current["last_signal_at"] = row["last_ts"]
+            current["status"] = "closed"
+            current["closing_cluster_id"] = str(row.get("cluster_id") or "")
+            current["signal_cluster_count"] = int(current["signal_cluster_count"]) + 1
+            current["raw_trade_count"] = int(current["raw_trade_count"]) + int(row.get("trade_count") or 0)
+            current["supporting_wallets"].update(support_wallets)
+            current["supporting_wallet_count"] = len(current["supporting_wallets"])
+            current["exit_price"] = exit_price
+            current["exit_cost_total_usdc"] = exit_cost_unit * contracts_total
+            current["realized_pnl_raw_usdc"] = realized_raw_usdc
+            current["realized_pnl_net_usdc"] = realized_net_usdc
+            closed_rows.append(current.copy())
+            del open_positions[token_id]
+
+    open_rows: list[dict[str, Any]] = []
+    for position in open_positions.values():
+        position["supporting_wallets"] = json.dumps(sorted(position["supporting_wallets"]))
+        open_rows.append(position)
+
+    normalized_closed: list[dict[str, Any]] = []
+    for position in closed_rows:
+        position["supporting_wallets"] = json.dumps(sorted(position["supporting_wallets"]))
+        normalized_closed.append(position)
+
+    if skipped_rows:
+        skipped = pd.DataFrame.from_records(skipped_rows)
+        skipped = skipped.sort_values(["cluster_id"]).reset_index(drop=True)
+    else:
+        skipped = pd.DataFrame(
+            columns=["cluster_id", "action", "reason", "token_id", "market_id", "event_title", "outcome"]
+        )
+
+    open_frame = pd.DataFrame.from_records(open_rows)
+    if not open_frame.empty:
+        open_frame = open_frame.sort_values(["opened_at", "token_id"]).reset_index(drop=True)
+    closed_frame = pd.DataFrame.from_records(normalized_closed)
+    if not closed_frame.empty:
+        closed_frame = closed_frame.sort_values(["opened_at", "token_id"]).reset_index(drop=True)
+
+    return (open_frame, closed_frame), skipped
+
+
+def _mark_open_positions(
+    open_positions: pd.DataFrame,
+    *,
+    cutoff: pd.Timestamp,
+    terminal_lookup: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    if open_positions.empty:
+        return open_positions.copy()
+
+    token_ids = sorted(open_positions["token_id"].dropna().astype(str).unique().tolist())
+    price_history = _load_price_history_chunked(token_ids, end_ts=cutoff)
+    price_index = _build_price_index(price_history)
+    cutoff_epoch = _to_epoch_seconds(cutoff)
+
+    marked_rows: list[dict[str, Any]] = []
+    for row in open_positions.to_dict(orient="records"):
+        token_id = str(row["token_id"])
+        terminal_info = terminal_lookup.get(token_id) or {}
+        mark_price, mark_source, mark_age_seconds = _lookup_latest_price_at_or_before(price_index, token_id, cutoff_epoch)
+        if mark_price is None and terminal_info.get("terminal_price") is not None:
+            mark_price = float(terminal_info["terminal_price"])
+            mark_source = "gamma_outcome_prices_current_fallback"
+            mark_age_seconds = None
+
+        contracts_total = float(row.get("entry_contracts") or 0.0)
+        entry_price = float(row.get("weighted_avg_entry_price") or 0.0)
+        raw_mtm_usdc = None if mark_price is None else (float(mark_price) - entry_price) * contracts_total
+        net_mtm_usdc = (
+            calculate_net_pnl(raw_mtm_usdc, float(row.get("entry_cost_total_usdc") or 0.0))
+            if raw_mtm_usdc is not None
+            else None
+        )
+        marked = dict(row)
+        marked["analysis_cutoff"] = cutoff
+        marked["mark_price"] = mark_price
+        marked["mark_price_source"] = mark_source
+        marked["mark_price_age_seconds"] = mark_age_seconds
+        marked["mtm_pnl_raw_usdc"] = raw_mtm_usdc
+        marked["mtm_pnl_net_usdc"] = net_mtm_usdc
+        marked["holding_days_open"] = (
+            (cutoff - pd.to_datetime(row["opened_at"], utc=True)).total_seconds() / 86400.0
+        )
+        marked_rows.append(marked)
+
+    return pd.DataFrame.from_records(marked_rows).sort_values(
+        ["mtm_pnl_net_usdc", "opened_at"], ascending=[False, True], na_position="last"
+    )
+
+
+def _build_daily_equity_curve(
+    closed_positions: pd.DataFrame,
+    open_positions: pd.DataFrame,
+    *,
+    cutoff: pd.Timestamp,
+    terminal_lookup: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    if not closed_positions.empty:
+        frames.append(closed_positions[["opened_at", "closed_at"]].copy())
+    if not open_positions.empty:
+        frames.append(open_positions[["opened_at"]].copy())
+    if not frames:
+        return pd.DataFrame()
+
+    anchors = pd.concat(frames, ignore_index=True)
+    min_opened = pd.to_datetime(anchors["opened_at"], utc=True, errors="coerce").min()
+    if pd.isna(min_opened):
+        return pd.DataFrame()
+
+    daily_index = pd.date_range(min_opened.floor("D"), cutoff.floor("D"), freq="D", tz="UTC")
+
+    token_ids = sorted(
+        pd.concat(
+            [
+                closed_positions["token_id"] if "token_id" in closed_positions.columns else pd.Series(dtype=str),
+                open_positions["token_id"] if "token_id" in open_positions.columns else pd.Series(dtype=str),
+            ],
+            ignore_index=True,
+        )
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    price_history = _load_price_history_chunked(token_ids, end_ts=cutoff)
+    price_index = _build_price_index(price_history)
+
+    curve_rows: list[dict[str, Any]] = []
+    closed_records = closed_positions.to_dict(orient="records")
+    open_records = open_positions.to_dict(orient="records")
+
+    for day in daily_index:
+        day_end = day + pd.Timedelta(hours=23, minutes=59, seconds=59)
+        day_epoch = _to_epoch_seconds(day_end)
+        realized_net = 0.0
+        open_mtm_net = 0.0
+        open_count = 0
+        marked_count = 0
+
+        for row in closed_records:
+            close_ts = pd.to_datetime(row.get("closed_at"), utc=True, errors="coerce")
+            if close_ts is not None and not pd.isna(close_ts) and close_ts <= day_end:
+                realized_net += float(row.get("realized_pnl_net_usdc") or 0.0)
+                continue
+
+            open_ts = pd.to_datetime(row.get("opened_at"), utc=True, errors="coerce")
+            if open_ts is None or pd.isna(open_ts) or open_ts > day_end:
+                continue
+            open_count += 1
+            token_id = str(row.get("token_id") or "")
+            mark_price, _, _ = _lookup_latest_price_at_or_before(price_index, token_id, day_epoch)
+            if mark_price is None:
+                terminal_price = (terminal_lookup.get(token_id) or {}).get("terminal_price")
+                if terminal_price is not None:
+                    mark_price = float(terminal_price)
+            if mark_price is None:
+                continue
+            marked_count += 1
+            entry_price = float(row.get("weighted_avg_entry_price") or 0.0)
+            contracts = float(row.get("entry_contracts") or 0.0)
+            raw_mtm_usdc = (float(mark_price) - entry_price) * contracts
+            open_mtm_net += float(
+                calculate_net_pnl(raw_mtm_usdc, float(row.get("entry_cost_total_usdc") or 0.0)) or 0.0
+            )
+
+        for row in open_records:
+            open_ts = pd.to_datetime(row.get("opened_at"), utc=True, errors="coerce")
+            if open_ts is None or pd.isna(open_ts) or open_ts > day_end:
+                continue
+            open_count += 1
+            token_id = str(row.get("token_id") or "")
+            mark_price, _, _ = _lookup_latest_price_at_or_before(price_index, token_id, day_epoch)
+            if mark_price is None:
+                terminal_price = (terminal_lookup.get(token_id) or {}).get("terminal_price")
+                if terminal_price is not None:
+                    mark_price = float(terminal_price)
+            if mark_price is None:
+                continue
+            marked_count += 1
+            entry_price = float(row.get("weighted_avg_entry_price") or 0.0)
+            contracts = float(row.get("entry_contracts") or 0.0)
+            raw_mtm_usdc = (float(mark_price) - entry_price) * contracts
+            open_mtm_net += float(
+                calculate_net_pnl(raw_mtm_usdc, float(row.get("entry_cost_total_usdc") or 0.0)) or 0.0
+            )
+
+        curve_rows.append(
+            {
+                "date": day.date().isoformat(),
+                "day_end_ts": day_end.isoformat(),
+                "cumulative_realized_net_usdc": realized_net,
+                "open_mtm_net_usdc": open_mtm_net,
+                "combined_equity_net_usdc": realized_net + open_mtm_net,
+                "open_positions_count": open_count,
+                "marked_open_positions_count": marked_count,
+                "mark_coverage_share": (marked_count / open_count) if open_count else None,
+            }
+        )
+
+    return pd.DataFrame.from_records(curve_rows)
+
+
+def _plot_equity_curve(curve: pd.DataFrame, path: Path) -> Path | None:
+    if curve.empty:
+        return None
+    figure, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(curve["date"], curve["combined_equity_net_usdc"], label="Combined Equity", linewidth=2.0)
+    axis.plot(curve["date"], curve["cumulative_realized_net_usdc"], label="Realized Only", linewidth=1.4)
+    axis.set_title("Unified House Portfolio Equity Curve")
+    axis.set_ylabel("Net PnL (USDC)")
+    axis.set_xlabel("Date")
+    axis.legend()
+    axis.grid(alpha=0.25)
+    figure.autofmt_xdate()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.tight_layout()
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+    return path
+
+
+def run_paper_tracking_performance(
+    consolidated_dir: str | Path = DEFAULT_CONSOLIDATED_DIR,
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    *,
+    analysis_cutoff: str | None = None,
+) -> dict[str, Any]:
+    consolidated_root = Path(consolidated_dir)
+    output_root = Path(output_dir)
+
+    tape = _read_csv(consolidated_root / "house_signal_tape.csv")
+    if tape.empty:
+        raise ValueError("house_signal_tape.csv is required to build performance tracking")
+
+    (open_positions, closed_positions), skipped = _build_house_position_ledger(tape)
+    cutoff = pd.to_datetime(analysis_cutoff, utc=True, errors="coerce")
+    if cutoff is None or pd.isna(cutoff):
+        cutoff = pd.Timestamp.now(tz="UTC")
+
+    with get_session() as session:
+        terminal_lookup = _build_terminal_lookup(load_markets_frame(session))
+
+    marked_open_positions = _mark_open_positions(open_positions, cutoff=cutoff, terminal_lookup=terminal_lookup)
+    curve = _build_daily_equity_curve(
+        closed_positions=closed_positions,
+        open_positions=open_positions,
+        cutoff=cutoff,
+        terminal_lookup=terminal_lookup,
+    )
+
+    open_path = _write_csv(marked_open_positions, output_root / "house_open_position_performance.csv")
+    closed_path = _write_csv(closed_positions, output_root / "house_closed_position_performance.csv")
+    skipped_path = _write_csv(skipped, output_root / "house_skipped_position_records.csv")
+    curve_path = _write_csv(curve, output_root / "house_portfolio_daily_equity_curve.csv")
+    plot_path = _plot_equity_curve(curve, output_root / "house_portfolio_daily_equity_curve.png")
+
+    realized_total = float(closed_positions.get("realized_pnl_net_usdc", pd.Series(dtype=float)).fillna(0).sum())
+    open_mtm_total = float(marked_open_positions.get("mtm_pnl_net_usdc", pd.Series(dtype=float)).fillna(0).sum())
+    combined_total = realized_total + open_mtm_total
+    markable_open = int(marked_open_positions.get("mtm_pnl_net_usdc", pd.Series(dtype=float)).notna().sum())
+    total_open = int(len(marked_open_positions))
+    total_closed = int(len(closed_positions))
+    skipped_count = int(len(skipped))
+    avg_holding_days_open = (
+        float(marked_open_positions["holding_days_open"].mean())
+        if not marked_open_positions.empty and "holding_days_open" in marked_open_positions
+        else None
+    )
+    avg_realized_holding_days = (
+        float(
+            (
+                pd.to_datetime(closed_positions["closed_at"], utc=True, errors="coerce")
+                - pd.to_datetime(closed_positions["opened_at"], utc=True, errors="coerce")
+            )
+            .dt.total_seconds()
+            .div(86400.0)
+            .mean()
+        )
+        if not closed_positions.empty
+        else None
+    )
+
+    summary_lines = [
+        "# House Portfolio Performance Summary\n",
+        "\n",
+        "This layer tracks the unified house portfolio after duplicate wallet signals and opposite-outcome market conflicts have already been consolidated away.\n",
+        "\n",
+        f"- Analysis cutoff: `{cutoff.isoformat()}`\n",
+        f"- Open house positions: `{total_open}`\n",
+        f"- Closed house positions: `{total_closed}`\n",
+        f"- Skipped / unpriceable ledger records: `{skipped_count}`\n",
+        f"- Closed-position realized net PnL: `{realized_total:.2f} USDC`\n",
+        f"- Open-position MTM net PnL: `{open_mtm_total:.2f} USDC`\n",
+        f"- Combined house portfolio net PnL: `{combined_total:.2f} USDC`\n",
+        f"- Marked open positions: `{markable_open}/{total_open}`\n",
+        (
+            f"- Average holding days for currently open positions: `{avg_holding_days_open:.2f}`\n"
+            if avg_holding_days_open is not None
+            else ""
+        ),
+        (
+            f"- Average realized holding days for closed positions: `{avg_realized_holding_days:.2f}`\n"
+            if avg_realized_holding_days is not None
+            else ""
+        ),
+        "\n",
+        "## Output Files\n",
+        f"- `house_open_position_performance.csv`: `{open_path}`\n",
+        f"- `house_closed_position_performance.csv`: `{closed_path}`\n",
+        f"- `house_skipped_position_records.csv`: `{skipped_path}`\n",
+        f"- `house_portfolio_daily_equity_curve.csv`: `{curve_path}`\n",
+    ]
+    if plot_path is not None:
+        summary_lines.append(
+            f"- `house_portfolio_daily_equity_curve.png`: `{plot_path}`\n"
+        )
+
+    summary_lines.extend(
+        [
+            "\n",
+            "## Interpretation\n",
+            "- `realized net PnL` uses unified house exits when source wallets produce a consolidated sell signal.\n",
+            "- `open MTM net PnL` marks still-open house positions to the latest locally available public price history, with current Gamma terminal values only as a fallback.\n",
+            "- The daily equity curve combines cumulative realized PnL with day-end MTM on positions that were still open on each day.\n",
+        ]
+    )
+    summary_path = output_root / "house_portfolio_performance_summary.md"
+    summary_path.write_text("".join(part for part in summary_lines if part), encoding="utf-8")
+
+    return {
+        "open_positions": marked_open_positions,
+        "closed_positions": closed_positions,
+        "skipped_positions": skipped,
+        "curve": curve,
+        "summary_path": summary_path,
+        "open_path": open_path,
+        "closed_path": closed_path,
+        "skipped_path": skipped_path,
+        "curve_path": curve_path,
+        "plot_path": plot_path,
+    }

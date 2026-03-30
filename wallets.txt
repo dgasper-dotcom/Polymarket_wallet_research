@@ -1,0 +1,7 @@
+# Example public Polymarket wallets for research-only backfills.
+# Blank lines and comments are ignored. Duplicate addresses are deduped.
+
+0x56687bf447db6ffa42ffe2204a05edaa20f55839
+
+# Duplicate on purpose to demonstrate deduplication.
+0x56687bf447db6ffa42ffe2204a05edaa20f55839

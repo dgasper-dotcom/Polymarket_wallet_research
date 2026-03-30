@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from research.paper_tracking_performance import _build_house_position_ledger
+
+
+def test_build_house_position_ledger_weights_reinforcements() -> None:
+    tape = pd.DataFrame.from_records(
+        [
+            {
+                "cluster_id": "buy1",
+                "action": "open_long",
+                "side": "BUY",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event",
+                "outcome": "Yes",
+                "first_ts": "2026-01-01T00:00:00+00:00",
+                "last_ts": "2026-01-01T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xaaa"]',
+                "total_notional_usdc": 100.0,
+                "avg_signal_price": 0.50,
+            },
+            {
+                "cluster_id": "buy2",
+                "action": "reinforce_long",
+                "side": "BUY",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event",
+                "outcome": "Yes",
+                "first_ts": "2026-01-02T00:00:00+00:00",
+                "last_ts": "2026-01-02T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xbbb"]',
+                "total_notional_usdc": 60.0,
+                "avg_signal_price": 0.75,
+            },
+            {
+                "cluster_id": "sell1",
+                "action": "close_long",
+                "side": "SELL",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event",
+                "outcome": "Yes",
+                "first_ts": "2026-01-03T00:00:00+00:00",
+                "last_ts": "2026-01-03T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xaaa"]',
+                "total_notional_usdc": 0.0,
+                "avg_signal_price": 0.90,
+            },
+        ]
+    )
+
+    (open_positions, closed_positions), skipped = _build_house_position_ledger(tape)
+
+    assert open_positions.empty
+    assert skipped.empty
+    assert len(closed_positions) == 1
+    row = closed_positions.iloc[0]
+    assert row["reinforcement_count"] == 1
+    assert row["supporting_wallet_count"] == 2
+    assert round(float(row["entry_contracts"]), 6) == 280.0
+    assert round(float(row["weighted_avg_entry_price"]), 6) == round(160.0 / 280.0, 6)
+    assert float(row["realized_pnl_raw_usdc"]) > 0
