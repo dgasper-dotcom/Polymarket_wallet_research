@@ -8,7 +8,7 @@ Included here:
 - copy-ready wallet watchlists
 - investor-facing subset summaries
 - unified paper-tracking portfolio summaries
+- frozen forward-paper operating snapshots
 - selected charts and equity curves
 
 To regenerate the full research outputs, use the scripts in [`scripts/`](/Users/davidgasper/Downloads/polymarket_wallet_research/scripts) against a local database.
-

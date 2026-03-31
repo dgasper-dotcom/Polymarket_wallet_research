@@ -77,6 +77,12 @@ def main() -> None:
         help="Optional hard cap on wallet-attributed open notional across the house book.",
     )
     parser.add_argument(
+        "--max-total-open-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on total concurrent open house notional across the whole portfolio.",
+    )
+    parser.add_argument(
         "--max-refresh-specs",
         type=int,
         default=250,
@@ -109,6 +115,7 @@ def main() -> None:
         "max_position_notional_usdc": args.max_position_notional_usdc,
         "max_event_notional_usdc": args.max_event_notional_usdc,
         "max_wallet_open_notional_usdc": args.max_wallet_open_notional_usdc,
+        "max_total_open_notional_usdc": args.max_total_open_notional_usdc,
     }
     if args.wallet_csv:
         tracking_kwargs["wallet_csv"] = args.wallet_csv
@@ -122,6 +129,7 @@ def main() -> None:
         max_position_notional_usdc=args.max_position_notional_usdc,
         max_event_notional_usdc=args.max_event_notional_usdc,
         max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
+        max_total_open_notional_usdc=args.max_total_open_notional_usdc,
     )
 
     refresh_result = None
@@ -145,6 +153,7 @@ def main() -> None:
         max_position_notional_usdc=args.max_position_notional_usdc,
         max_event_notional_usdc=args.max_event_notional_usdc,
         max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
+        max_total_open_notional_usdc=args.max_total_open_notional_usdc,
     )
 
     dashboard_kwargs = {

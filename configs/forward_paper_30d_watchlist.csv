@@ -1,0 +1,9 @@
+display_name,wallet_id,action_bucket,action_rationale,pma_copy_combined_net_30s,combined_realized_plus_mtm_pnl_usdc_est,notes
+MikeMoore,0x5d2f49295387e01a49f0a3e59449ceed791c4adb,copy_ready,current_best_live_wallet_contributor,15236.546211421617,-3310.298811250883,copy in unified house book for next 30 days
+ELICHOU,0x312bcca3bc77bdc1d37dc6db5b9c1493de61cafe,copy_ready,current_positive_live_wallet_contributor,3381.7821593249446,-2599.2862328085503,copy in unified house book for next 30 days
+aikko,0x68d1b156197fc516c56fc95d325b3716322c3c4d,copy_ready,current_positive_live_wallet_contributor,2656.9213393291398,-1382.6302417296617,copy in unified house book for next 30 days
+sbinnala,0xc483ee2ce773ae281131382ecc6285c968b88ac8,copy_ready,current_positive_live_wallet_contributor,16371.906666161754,-646.1556949106637,copy in unified house book for next 30 days
+0x53_candidate,0x53ecc53e7a69aad0e6dda60264cc2e363092df91,monitor,monitor_only_current_live_drag,32953.89245105571,22895.00056664452,monitor only during next 30 days
+SnowballHustle,0xe36296a42555b95e95880412387e954d84b0bd00,monitor,monitor_only_current_live_drag,15644.365709365387,8356.545983478507,monitor only during next 30 days
+PetrGrepl,0xe7590338d435112c032e3ea51ff3d08a27a1e7ca,monitor,monitor_only_current_live_drag,5820.7732841247,3701.9603872077632,monitor only during next 30 days
+RobertoRubio,0x3c4c03892f47d3166ee049a48a73d4743a17dd95,monitor,monitor_only_current_live_drag,1282.9768365382733,-7176.437382014097,monitor only during next 30 days

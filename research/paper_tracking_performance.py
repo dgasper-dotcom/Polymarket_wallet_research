@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any
 import sys
@@ -17,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from clients.clob_client import ClobClient
 from db.session import get_session
 from ingestion.markets import backfill_markets_for_references
 from research.all_active_reevaluation import (
@@ -26,6 +28,7 @@ from research.all_active_reevaluation import (
 from research.copy_follow_expiry import _build_terminal_lookup, load_markets_frame
 from research.costs import calculate_net_pnl, estimate_entry_only_cost
 from research.delay_analysis import _build_price_index, _to_epoch_seconds
+from research.enrich_trades import _extract_book_metrics, _fetch_order_books
 from research.house_portfolio_rules import (
     aggregate_wallet_contributions,
     allowed_house_notional,
@@ -38,6 +41,31 @@ from research.house_portfolio_rules import (
 
 DEFAULT_CONSOLIDATED_DIR = "exports/manual_seed_paper_tracking/consolidated"
 DEFAULT_OUTPUT_DIR = "exports/manual_seed_paper_tracking/performance"
+
+
+def _should_use_live_books(cutoff: pd.Timestamp) -> bool:
+    """Only use live book marks when the requested cutoff is effectively current."""
+
+    if os.getenv("POLY_DISABLE_LIVE_BOOK_MARKS", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    now = pd.Timestamp.now(tz="UTC")
+    return abs((now - cutoff).total_seconds()) <= 3600.0
+
+
+async def _fetch_live_book_midpoints(token_ids: list[str]) -> dict[str, float]:
+    """Fetch current public order books and return midpoint marks when available."""
+
+    if not token_ids:
+        return {}
+    async with ClobClient() as client:
+        books = await _fetch_order_books(token_ids, client=client)
+    live_midpoints: dict[str, float] = {}
+    for token_id, book in books.items():
+        metrics = _extract_book_metrics(book)
+        midpoint = metrics.get("mid_at_trade")
+        if midpoint is not None:
+            live_midpoints[str(token_id)] = float(midpoint)
+    return live_midpoints
 
 
 def _read_csv(path: str | Path) -> pd.DataFrame:
@@ -409,12 +437,25 @@ def _mark_open_positions(
     price_history = _load_price_history_chunked(token_ids, end_ts=cutoff)
     price_index = _build_price_index(price_history)
     cutoff_epoch = _to_epoch_seconds(cutoff)
+    live_midpoints: dict[str, float] = {}
+    if _should_use_live_books(cutoff):
+        try:
+            live_midpoints = asyncio.run(_fetch_live_book_midpoints(token_ids))
+        except Exception:
+            live_midpoints = {}
 
     marked_rows: list[dict[str, Any]] = []
     for row in open_positions.to_dict(orient="records"):
         token_id = str(row["token_id"])
         terminal_info = terminal_lookup.get(token_id) or {}
-        mark_price, mark_source, mark_age_seconds = _lookup_latest_price_at_or_before(price_index, token_id, cutoff_epoch)
+        mark_price = live_midpoints.get(token_id)
+        if mark_price is not None:
+            mark_source = "live_book_midpoint_current"
+            mark_age_seconds = 0.0
+        else:
+            mark_price, mark_source, mark_age_seconds = _lookup_latest_price_at_or_before(
+                price_index, token_id, cutoff_epoch
+            )
         if mark_price is None and terminal_info.get("terminal_price") is not None:
             mark_price = float(terminal_info["terminal_price"])
             mark_source = "gamma_outcome_prices_current_fallback"
@@ -714,10 +755,13 @@ def run_paper_tracking_performance(
             }
         )
         if missing_terminal_tokens:
-            asyncio.run(backfill_markets_for_references(session, token_ids=missing_terminal_tokens))
-            session.commit()
-            markets = load_markets_frame(session)
-            terminal_lookup = _build_terminal_lookup(markets)
+            try:
+                asyncio.run(backfill_markets_for_references(session, token_ids=missing_terminal_tokens))
+                session.commit()
+                markets = load_markets_frame(session)
+                terminal_lookup = _build_terminal_lookup(markets)
+            except Exception:
+                session.rollback()
 
     marked_open_positions = _mark_open_positions(open_positions, cutoff=cutoff, terminal_lookup=terminal_lookup)
     closed_positions = _annotate_closed_wallet_attribution(closed_positions)

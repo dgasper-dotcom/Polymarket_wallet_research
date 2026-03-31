@@ -16,6 +16,8 @@ def _is_retryable_exception(exc: BaseException) -> bool:
     """Retry network errors and server-side HTTP failures only."""
 
     if isinstance(exc, httpx.RequestError):
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            return False
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code

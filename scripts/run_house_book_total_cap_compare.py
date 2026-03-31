@@ -44,6 +44,8 @@ def _write_summary_md(path: Path, rows: list[dict[str, object]], chart_path: Pat
     lines = [
         "# House Book Total-Cap Comparison",
         "",
+        f"- Per-position cap: `{float(rows[0]['max_position_notional_usdc']):,.2f} USDC`" if rows else "",
+        "",
         "| Total Open Cap | Realized PnL | Open MTM | Combined PnL | Entry Volume | Gross Turnover | Peak Concurrent Notional | Open Positions | Marked Open Positions |",
         "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
@@ -123,6 +125,12 @@ def main() -> None:
         default="10000,50000",
         help="Comma-separated total concurrent open-notional caps.",
     )
+    parser.add_argument(
+        "--max-position-notional-usdc",
+        type=float,
+        default=100.0,
+        help="Per-position notional cap to enforce alongside the total concurrent cap.",
+    )
     args = parser.parse_args()
 
     output_root = Path(args.output_dir)
@@ -140,11 +148,13 @@ def main() -> None:
             output_dir=run_root,
             cluster_window_hours=24,
             action_bucket=None,
+            max_position_notional_usdc=args.max_position_notional_usdc,
             max_total_open_notional_usdc=cap,
         )
         performance = run_paper_tracking_performance(
             consolidated_dir=run_root / "consolidated",
             output_dir=run_root / "performance",
+            max_position_notional_usdc=args.max_position_notional_usdc,
             max_total_open_notional_usdc=cap,
         )
 
@@ -153,6 +163,7 @@ def main() -> None:
         summary_rows.append(
             {
                 "max_total_open_notional_usdc": cap,
+                "max_position_notional_usdc": args.max_position_notional_usdc,
                 "realized_net_pnl_usdc": _safe_sum(performance["closed_positions"], "realized_pnl_net_usdc"),
                 "open_mtm_net_pnl_usdc": _safe_sum(performance["open_positions"], "mtm_pnl_net_usdc"),
                 "combined_net_pnl_usdc": _safe_sum(performance["closed_positions"], "realized_pnl_net_usdc")

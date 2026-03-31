@@ -1,0 +1,13 @@
+{
+  "name": "forward_paper_30d_core4",
+  "start_date_utc": "2026-03-31",
+  "wallet_csv": "configs/forward_paper_30d_core4_wallets.csv",
+  "watchlist_csv": "configs/forward_paper_30d_watchlist.csv",
+  "mapped_trades_csv": "exports/house_book_total_cap_compare_post_jan1/manual_seed_pma_mapped_trades_from_2026_01_01.csv",
+  "paper_output_dir": "exports/forward_paper_30d_core4",
+  "dashboard_output_dir": "exports/forward_paper_30d_core4/forward_tracker",
+  "cluster_window_hours": 24,
+  "max_position_notional_usdc": 100,
+  "max_total_open_notional_usdc": 50000,
+  "notes": "Forward 30-day paper book: copy the core 4 through the unified house book and monitor the other 4 wallets separately in the dashboard watchlist."
+}
