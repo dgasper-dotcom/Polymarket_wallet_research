@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from db.session import get_session
+from ingestion.markets import backfill_markets_for_references
 from research.all_active_reevaluation import (
     _load_price_history_chunked,
     _lookup_latest_price_at_or_before,
@@ -702,7 +704,20 @@ def run_paper_tracking_performance(
         cutoff = pd.Timestamp.now(tz="UTC")
 
     with get_session() as session:
-        terminal_lookup = _build_terminal_lookup(load_markets_frame(session))
+        markets = load_markets_frame(session)
+        terminal_lookup = _build_terminal_lookup(markets)
+        missing_terminal_tokens = sorted(
+            {
+                str(token_id)
+                for token_id in open_positions.get("token_id", pd.Series(dtype=str)).dropna().astype(str).tolist()
+                if str(token_id) not in terminal_lookup
+            }
+        )
+        if missing_terminal_tokens:
+            asyncio.run(backfill_markets_for_references(session, token_ids=missing_terminal_tokens))
+            session.commit()
+            markets = load_markets_frame(session)
+            terminal_lookup = _build_terminal_lookup(markets)
 
     marked_open_positions = _mark_open_positions(open_positions, cutoff=cutoff, terminal_lookup=terminal_lookup)
     closed_positions = _annotate_closed_wallet_attribution(closed_positions)
