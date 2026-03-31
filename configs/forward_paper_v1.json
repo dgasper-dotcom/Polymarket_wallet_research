@@ -1,0 +1,12 @@
+{
+  "wallet_csv": "configs/forward_paper_v1_wallets.csv",
+  "mapped_trades_csv": "exports/manual_seed_pma_full_history_backtest_no_lucky/manual_seed_pma_mapped_trades_full_history.csv",
+  "paper_output_dir": "exports/forward_paper_v1",
+  "dashboard_output_dir": "exports/forward_paper_v1/forward_tracker",
+  "watchlist_csv": "exports/manual_seed_copy_ready_v2/manual_seed_copy_ready_monitor_avoid.csv",
+  "cluster_window_hours": 24,
+  "max_position_notional_usdc": 100,
+  "max_event_notional_usdc": 400,
+  "max_refresh_specs": 250,
+  "refresh_all_open": true
+}

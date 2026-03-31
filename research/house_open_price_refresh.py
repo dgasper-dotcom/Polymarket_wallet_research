@@ -29,6 +29,9 @@ class RefreshSpec:
     market_id: str
     event_title: str
     outcome: str
+    entry_notional_usdc: float = 0.0
+    mark_price_age_seconds: float | None = None
+    missing_mark: bool = True
 
 
 def _read_rows(path: str | Path) -> list[dict[str, str]]:
@@ -51,6 +54,7 @@ def build_house_open_refresh_specs(
     *,
     performance_csv: str | Path | None = DEFAULT_HOUSE_OPEN_PERFORMANCE_CSV,
     only_missing_marks: bool = True,
+    max_specs: int | None = None,
 ) -> list[RefreshSpec]:
     """Build per-token refresh bounds for current house positions."""
 
@@ -58,26 +62,38 @@ def build_house_open_refresh_specs(
     if not position_rows:
         return []
 
+    perf_lookup: dict[str, dict[str, str]] = {}
     missing_tokens: set[str] | None = None
-    if only_missing_marks and performance_csv:
+    if performance_csv:
         perf_rows = _read_rows(performance_csv)
-        missing_tokens = {
-            str(row.get("token_id") or "")
-            for row in perf_rows
-            if str(row.get("token_id") or "").strip()
-            and (row.get("mark_price") in ("", None))
-        }
+        if perf_rows:
+            missing_tokens = {
+                str(row.get("token_id") or "")
+                for row in perf_rows
+                if str(row.get("token_id") or "").strip()
+                and (row.get("mark_price") in ("", None))
+            }
+        for row in perf_rows:
+            token_id = str(row.get("token_id") or "").strip()
+            if token_id and token_id not in perf_lookup:
+                perf_lookup[token_id] = row
 
     specs: dict[str, RefreshSpec] = {}
     for row in position_rows:
         token_id = str(row.get("token_id") or "").strip()
         if not token_id:
             continue
-        if missing_tokens is not None and token_id not in missing_tokens:
+        if only_missing_marks and missing_tokens is not None and token_id not in missing_tokens:
             continue
         opened_at = _to_utc_datetime(row.get("opened_at"))
         if opened_at is None:
             continue
+        perf_row = perf_lookup.get(token_id, {})
+        entry_notional_usdc = float(str(perf_row.get("entry_notional_usdc") or "0").replace(",", "") or 0.0)
+        raw_age = str(perf_row.get("mark_price_age_seconds") or "").strip()
+        mark_age_seconds = None if not raw_age or raw_age.lower() == "nan" else float(raw_age)
+        raw_mark = str(perf_row.get("mark_price") or "").strip()
+        missing_mark = not raw_mark or raw_mark.lower() == "nan"
         existing = specs.get(token_id)
         if existing is None or opened_at < existing.opened_at:
             specs[token_id] = RefreshSpec(
@@ -86,8 +102,23 @@ def build_house_open_refresh_specs(
                 market_id=str(row.get("market_id") or ""),
                 event_title=str(row.get("event_title") or ""),
                 outcome=str(row.get("outcome") or ""),
+                entry_notional_usdc=entry_notional_usdc,
+                mark_price_age_seconds=mark_age_seconds,
+                missing_mark=missing_mark,
             )
-    return sorted(specs.values(), key=lambda item: (item.opened_at, item.token_id))
+    ranked = sorted(
+        specs.values(),
+        key=lambda item: (
+            0 if item.missing_mark else 1,
+            -(item.entry_notional_usdc or 0.0),
+            -(item.mark_price_age_seconds or 0.0),
+            item.opened_at,
+            item.token_id,
+        ),
+    )
+    if max_specs is not None:
+        ranked = ranked[: max(0, int(max_specs))]
+    return ranked
 
 
 async def refresh_house_open_price_history(
@@ -100,11 +131,13 @@ async def refresh_house_open_price_history(
     margin_seconds: int = 3600,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     insecure_tls: bool = False,
+    max_specs: int | None = None,
 ) -> dict[str, Any]:
     specs = build_house_open_refresh_specs(
         positions_csv,
         performance_csv=performance_csv,
         only_missing_marks=only_missing_marks,
+        max_specs=max_specs,
     )
     now = datetime.now(tz=timezone.utc)
     token_bounds = [(spec.token_id, spec.opened_at, now) for spec in specs]
@@ -129,6 +162,9 @@ async def refresh_house_open_price_history(
             "market_id": spec.market_id,
             "event_title": spec.event_title,
             "outcome": spec.outcome,
+            "entry_notional_usdc": spec.entry_notional_usdc,
+            "mark_price_age_seconds": spec.mark_price_age_seconds,
+            "missing_mark": spec.missing_mark,
             "refreshed_price_rows": int(refresh_counts.get(spec.token_id, 0)),
         }
         for spec in specs
@@ -141,6 +177,9 @@ async def refresh_house_open_price_history(
             "market_id",
             "event_title",
             "outcome",
+            "entry_notional_usdc",
+            "mark_price_age_seconds",
+            "missing_mark",
             "refreshed_price_rows",
         ])
         writer.writeheader()
@@ -152,6 +191,7 @@ async def refresh_house_open_price_history(
         "\n",
         f"- Tokens targeted: `{len(specs)}`\n",
         f"- Only missing marks: `{only_missing_marks}`\n",
+        f"- Max prioritized tokens: `{max_specs if max_specs is not None else 'all'}`\n",
         f"- Insecure TLS fallback: `{insecure_tls}`\n",
         f"- Tokens with any new price rows: `{sum(1 for value in refresh_counts.values() if value > 0)}`\n",
         f"- Total new price rows written: `{sum(int(value) for value in refresh_counts.values())}`\n",

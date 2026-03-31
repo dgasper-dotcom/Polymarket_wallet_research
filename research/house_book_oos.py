@@ -19,6 +19,20 @@ def _parse_ts(value: str | None) -> datetime | None:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
+def _normalize_cutoff(value: str | datetime | None, tzinfo) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = _parse_ts(str(value))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None and tzinfo is not None:
+        parsed = parsed.replace(tzinfo=tzinfo)
+    return parsed
+
+
 def _float_or_zero(value: str | None) -> float:
     if value is None:
         return 0.0
@@ -166,6 +180,7 @@ def run_house_book_oos(
     open_csv: str | Path = "exports/manual_seed_paper_tracking/performance/house_open_position_performance.csv",
     output_dir: str | Path = "exports/manual_seed_paper_tracking/performance/oos_splits",
     ratios: tuple[float, ...] = (0.6, 0.7, 0.8),
+    date_cutoff: str | datetime | None = None,
 ) -> dict[str, object]:
     """Build chronological train/test splits for the unified house book."""
 
@@ -213,6 +228,18 @@ def run_house_book_oos(
             _summarize_positions(f"test_{ratio_label}_{100-ratio_label}", test_rows, cutoff_ts, analysis_cutoff)
         )
 
+    normalized_date_cutoff = _normalize_cutoff(date_cutoff, positions[0].opened_at.tzinfo)
+    if normalized_date_cutoff is not None:
+        train_rows = [row for row in positions if row.opened_at < normalized_date_cutoff]
+        test_rows = [row for row in positions if row.opened_at >= normalized_date_cutoff]
+        cutoff_label = normalized_date_cutoff.date().isoformat()
+        summary_rows.append(
+            _summarize_positions(f"train_before_{cutoff_label}", train_rows, normalized_date_cutoff, analysis_cutoff)
+        )
+        summary_rows.append(
+            _summarize_positions(f"test_from_{cutoff_label}", test_rows, normalized_date_cutoff, analysis_cutoff)
+        )
+
     csv_path = export_root / "house_book_oos_summary.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(summary_rows[0].keys()))
@@ -251,6 +278,7 @@ def run_house_book_oos(
     return {
         "summary_rows": summary_rows,
         "analysis_cutoff": analysis_cutoff,
+        "date_cutoff": normalized_date_cutoff,
         "csv_path": csv_path,
         "md_path": md_path,
     }

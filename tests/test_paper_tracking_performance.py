@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from research.paper_tracking_performance import _build_house_position_ledger, _build_house_position_ledger_with_cap
+from research.paper_tracking_performance import (
+    _build_contribution_tables,
+    _build_house_position_ledger,
+    _build_house_position_ledger_with_cap,
+)
 
 
 def test_build_house_position_ledger_weights_reinforcements() -> None:
@@ -123,3 +127,37 @@ def test_build_house_position_ledger_respects_position_cap() -> None:
     assert float(row["suppressed_notional_usdc"]) == 30.0
     assert len(skipped) == 1
     assert skipped.iloc[0]["reason"] == "position_cap_partial_reinforce"
+
+
+def test_build_contribution_tables_treats_missing_mtm_as_zero() -> None:
+    closed_positions = pd.DataFrame.from_records(
+        [
+            {
+                "event_title": "Event A",
+                "entry_notional_usdc": 100.0,
+                "realized_pnl_net_usdc": 20.0,
+                "wallet_notional_attribution": {"0xaaa": 100.0},
+            }
+        ]
+    )
+    open_positions = pd.DataFrame.from_records(
+        [
+            {
+                "event_title": "Event B",
+                "entry_notional_usdc": 50.0,
+                "mtm_pnl_net_usdc": float("nan"),
+                "wallet_notional_attribution": {"0xbbb": 50.0},
+            }
+        ]
+    )
+
+    wallet_contrib, event_contrib, wallet_metrics, event_metrics = _build_contribution_tables(
+        closed_positions=closed_positions,
+        open_positions=open_positions,
+    )
+
+    assert set(wallet_contrib["wallet"]) == {"0xaaa", "0xbbb"}
+    assert float(wallet_contrib.loc[wallet_contrib["wallet"] == "0xaaa", "combined_net_pnl_usdc"].iloc[0]) == 20.0
+    assert float(wallet_contrib.loc[wallet_contrib["wallet"] == "0xbbb", "combined_net_pnl_usdc"].iloc[0]) == 0.0
+    assert wallet_metrics["top1_positive_share"] == 1.0
+    assert event_metrics["top1_positive_share"] == 1.0

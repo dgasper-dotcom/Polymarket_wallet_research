@@ -119,6 +119,8 @@ def build_forward_paper_dashboard(
     cap_skipped_rows = _read_rows(base_root / "skipped_position_cap_records.csv")
     skipped_perf_rows = _read_rows(performance_root / "house_skipped_position_records.csv")
     signal_tape_rows = _read_rows(consolidated_root / "house_signal_tape.csv")
+    wallet_contrib_rows = _read_rows(performance_root / "house_wallet_contribution.csv")
+    event_contrib_rows = _read_rows(performance_root / "house_event_contribution.csv")
 
     perf_summary_path = performance_root / "house_portfolio_performance_summary.md"
     perf_summary_text = perf_summary_path.read_text(encoding="utf-8") if perf_summary_path.exists() else ""
@@ -198,6 +200,10 @@ def build_forward_paper_dashboard(
         f"- Open-position MTM net PnL: `{_extract_metric(perf_summary_text, 'Open-position MTM net PnL') or 'n/a'}`\n",
         f"- Combined house portfolio net PnL: `{_extract_metric(perf_summary_text, 'Combined house portfolio net PnL') or 'n/a'}`\n",
         f"- Open-position mark coverage: `{open_marked}/{len(open_perf_rows)}`\n",
+        f"- Wallet contribution top-1 share: `{_extract_metric(perf_summary_text, 'Wallet contribution positive-share top 1') or 'n/a'}`\n",
+        f"- Wallet contribution top-5 share: `{_extract_metric(perf_summary_text, 'Wallet contribution positive-share top 5') or 'n/a'}`\n",
+        f"- Event contribution top-1 share: `{_extract_metric(perf_summary_text, 'Event contribution positive-share top 1') or 'n/a'}`\n",
+        f"- Event contribution top-5 share: `{_extract_metric(perf_summary_text, 'Event contribution positive-share top 5') or 'n/a'}`\n",
         f"- Consolidated open signals: `{signal_counts.get('open_long', 0)}`\n",
         f"- Consolidated reinforce signals: `{signal_counts.get('reinforce_long', 0)}`\n",
         f"- Consolidated close signals: `{signal_counts.get('close_long', 0)}`\n",
@@ -251,6 +257,30 @@ def build_forward_paper_dashboard(
         dashboard_lines.append(
             f"- `{row.get('closed_at')}` | `{row.get('event_title')}` `{row.get('outcome')}` | "
             f"realized net `{(_to_float(row.get('realized_pnl_net_usdc')) or 0.0):.2f}`\n"
+        )
+
+    dashboard_lines.extend(
+        [
+            "\n",
+            "## Top Wallet Contributors\n",
+        ]
+    )
+    for row in wallet_contrib_rows[:10]:
+        dashboard_lines.append(
+            f"- `{row.get('wallet')}` | combined `{(_to_float(row.get('combined_net_pnl_usdc')) or 0.0):.2f}` | "
+            f"positions `{int(_to_float(row.get('positions')) or 0)}`\n"
+        )
+
+    dashboard_lines.extend(
+        [
+            "\n",
+            "## Top Event Contributors\n",
+        ]
+    )
+    for row in event_contrib_rows[:10]:
+        dashboard_lines.append(
+            f"- `{row.get('event_title')}` | combined `{(_to_float(row.get('combined_net_pnl_usdc')) or 0.0):.2f}` | "
+            f"positions `{int(_to_float(row.get('positions')) or 0)}`\n"
         )
 
     dashboard_lines.extend(

@@ -30,12 +30,18 @@ def main() -> None:
         default="exports/manual_seed_paper_tracking/performance/oos_splits",
         help="Directory for OOS split summaries.",
     )
+    parser.add_argument(
+        "--date-cutoff",
+        default=None,
+        help="Optional chronological cutoff date/time (for example 2026-01-01 or 2026-01-01T00:00:00+00:00).",
+    )
     args = parser.parse_args()
 
     results = run_house_book_oos(
         closed_csv=args.closed_csv,
         open_csv=args.open_csv,
         output_dir=args.output_dir,
+        date_cutoff=args.date_cutoff,
     )
     print(f"Wrote {results['csv_path']}")
     print(f"Wrote {results['md_path']}")

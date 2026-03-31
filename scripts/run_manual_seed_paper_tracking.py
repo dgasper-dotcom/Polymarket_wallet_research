@@ -41,6 +41,18 @@ def main() -> None:
         default=None,
         help="Optional hard cap on cumulative house notional per token.",
     )
+    parser.add_argument(
+        "--max-event-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on cumulative house notional per event title.",
+    )
+    parser.add_argument(
+        "--max-wallet-open-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on wallet-attributed open notional across the house book.",
+    )
     args = parser.parse_args()
 
     result = run_paper_tracking_model(
@@ -48,6 +60,8 @@ def main() -> None:
         cluster_window_hours=args.cluster_window_hours,
         action_bucket=args.action_bucket or None,
         max_position_notional_usdc=args.max_position_notional_usdc,
+        max_event_notional_usdc=args.max_event_notional_usdc,
+        max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
     )
 
     print(result["summary_path"])

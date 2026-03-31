@@ -23,6 +23,16 @@ from research.paper_tracking_performance import run_paper_tracking_performance
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--wallet-csv",
+        default=None,
+        help="Optional explicit wallet list CSV. When omitted, the default action-bucket source is used.",
+    )
+    parser.add_argument(
+        "--mapped-trades-csv",
+        default=None,
+        help="Optional mapped-trades CSV override.",
+    )
+    parser.add_argument(
         "--paper-output-dir",
         default="exports/manual_seed_paper_tracking",
         help="Base output directory for the unified paper-tracking model.",
@@ -31,6 +41,11 @@ def main() -> None:
         "--dashboard-output-dir",
         default=DEFAULT_DASHBOARD_DIR,
         help="Directory for forward-paper dashboard outputs.",
+    )
+    parser.add_argument(
+        "--watchlist-csv",
+        default=None,
+        help="Optional watchlist CSV used for the dashboard snapshot.",
     )
     parser.add_argument(
         "--action-bucket",
@@ -48,6 +63,24 @@ def main() -> None:
         type=float,
         default=None,
         help="Optional hard cap on cumulative house notional per token.",
+    )
+    parser.add_argument(
+        "--max-event-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on cumulative house notional per event title.",
+    )
+    parser.add_argument(
+        "--max-wallet-open-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on wallet-attributed open notional across the house book.",
+    )
+    parser.add_argument(
+        "--max-refresh-specs",
+        type=int,
+        default=250,
+        help="Maximum number of prioritized open tokens to refresh during the MTM update step.",
     )
     parser.add_argument(
         "--skip-refresh",
@@ -69,11 +102,26 @@ def main() -> None:
     paper_output = Path(args.paper_output_dir)
     performance_dir = paper_output / "performance"
 
-    tracking = run_paper_tracking_model(
-        output_dir=paper_output,
-        cluster_window_hours=args.cluster_window_hours,
-        action_bucket=args.action_bucket or None,
+    tracking_kwargs = {
+        "output_dir": paper_output,
+        "cluster_window_hours": args.cluster_window_hours,
+        "action_bucket": args.action_bucket or None,
+        "max_position_notional_usdc": args.max_position_notional_usdc,
+        "max_event_notional_usdc": args.max_event_notional_usdc,
+        "max_wallet_open_notional_usdc": args.max_wallet_open_notional_usdc,
+    }
+    if args.wallet_csv:
+        tracking_kwargs["wallet_csv"] = args.wallet_csv
+    if args.mapped_trades_csv:
+        tracking_kwargs["mapped_trades_csv"] = args.mapped_trades_csv
+    tracking = run_paper_tracking_model(**tracking_kwargs)
+
+    performance = run_paper_tracking_performance(
+        consolidated_dir=paper_output / "consolidated",
+        output_dir=performance_dir,
         max_position_notional_usdc=args.max_position_notional_usdc,
+        max_event_notional_usdc=args.max_event_notional_usdc,
+        max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
     )
 
     refresh_result = None
@@ -87,6 +135,7 @@ def main() -> None:
                     only_missing_marks=not args.refresh_all_open,
                     output_dir=paper_output / "price_refresh",
                     insecure_tls=args.insecure_tls,
+                    max_specs=args.max_refresh_specs,
                 )
             )
 
@@ -94,12 +143,17 @@ def main() -> None:
         consolidated_dir=paper_output / "consolidated",
         output_dir=performance_dir,
         max_position_notional_usdc=args.max_position_notional_usdc,
+        max_event_notional_usdc=args.max_event_notional_usdc,
+        max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
     )
 
-    dashboard = build_forward_paper_dashboard(
-        base_dir=paper_output,
-        output_dir=args.dashboard_output_dir,
-    )
+    dashboard_kwargs = {
+        "base_dir": paper_output,
+        "output_dir": args.dashboard_output_dir,
+    }
+    if args.watchlist_csv:
+        dashboard_kwargs["watchlist_csv"] = args.watchlist_csv
+    dashboard = build_forward_paper_dashboard(**dashboard_kwargs)
 
     print(tracking["summary_path"])
     if refresh_result is not None:
