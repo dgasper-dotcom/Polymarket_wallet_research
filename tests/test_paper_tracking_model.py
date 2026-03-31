@@ -146,3 +146,95 @@ def test_paper_tracking_model_builds_unified_open_and_conflict(tmp_path: Path) -
     assert len(result["conflict_rows"]) == 1
     assert result["closed_rows"][0]["reinforcement_count"] == 0
     assert result["closed_rows"][0]["signal_cluster_count"] == 2
+
+
+def test_paper_tracking_model_caps_position_notional(tmp_path: Path) -> None:
+    wallet_csv = tmp_path / "wallets.csv"
+    trades_csv = tmp_path / "mapped_trades.csv"
+
+    _write_csv(
+        wallet_csv,
+        ["display_name", "wallet_id", "action_bucket"],
+        [{"display_name": "A", "wallet_id": "0xaaa", "action_bucket": "copy_ready"}],
+    )
+    _write_csv(
+        trades_csv,
+        [
+            "trade_id",
+            "wallet_address",
+            "wallet_name",
+            "timestamp",
+            "side",
+            "price",
+            "size",
+            "usdc_size",
+            "event_id",
+            "event_title",
+            "market_subtitle",
+            "outcome",
+            "market_id",
+            "token_id",
+            "raw_json",
+            "spread_at_trade",
+            "slippage_bps_assumed",
+            "liquidity_bucket",
+        ],
+        [
+            {
+                "trade_id": "1",
+                "wallet_address": "0xaaa",
+                "wallet_name": "A",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "160",
+                "usdc_size": "80",
+                "event_id": "e1",
+                "event_title": "Event 1",
+                "market_subtitle": "",
+                "outcome": "Yes",
+                "market_id": "m1",
+                "token_id": "t_yes",
+                "raw_json": "{}",
+                "spread_at_trade": "",
+                "slippage_bps_assumed": "",
+                "liquidity_bucket": "",
+            },
+            {
+                "trade_id": "2",
+                "wallet_address": "0xaaa",
+                "wallet_name": "A",
+                "timestamp": "2026-01-02T00:00:00+00:00",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "100",
+                "usdc_size": "50",
+                "event_id": "e1",
+                "event_title": "Event 1",
+                "market_subtitle": "",
+                "outcome": "Yes",
+                "market_id": "m1",
+                "token_id": "t_yes",
+                "raw_json": "{}",
+                "spread_at_trade": "",
+                "slippage_bps_assumed": "",
+                "liquidity_bucket": "",
+            },
+        ],
+    )
+
+    result = run_paper_tracking_model(
+        wallet_csv=wallet_csv,
+        mapped_trades_csv=trades_csv,
+        output_dir=tmp_path / "out",
+        cluster_window_hours=1,
+        action_bucket="copy_ready",
+        max_position_notional_usdc=100.0,
+    )
+
+    assert len(result["open_rows"]) == 1
+    open_row = result["open_rows"][0]
+    assert float(open_row["total_signaled_notional_usdc"]) == 130.0
+    assert float(open_row["executed_notional_usdc"]) == 100.0
+    assert float(open_row["suppressed_notional_usdc"]) == 30.0
+    assert len(result["conflict_rows"]) == 0

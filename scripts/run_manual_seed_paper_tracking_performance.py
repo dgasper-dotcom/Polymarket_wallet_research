@@ -35,12 +35,19 @@ def main() -> None:
         default=None,
         help="Optional UTC timestamp cutoff for MTM evaluation.",
     )
+    parser.add_argument(
+        "--max-position-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on cumulative house notional per token.",
+    )
     args = parser.parse_args()
 
     result = run_paper_tracking_performance(
         consolidated_dir=args.consolidated_dir,
         output_dir=args.output_dir,
         analysis_cutoff=args.analysis_cutoff,
+        max_position_notional_usdc=args.max_position_notional_usdc,
     )
     print(result["summary_path"])
     print(result["open_path"])

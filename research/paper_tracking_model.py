@@ -44,20 +44,66 @@ def _write_csv(
     return path
 
 
+def _capped_notional(
+    signaled_notional: float,
+    current_notional: float,
+    max_position_notional_usdc: float | None,
+) -> tuple[float, float]:
+    """Return executed and skipped notional under a per-position cap."""
+
+    if max_position_notional_usdc is None:
+        return signaled_notional, 0.0
+    remaining = max(0.0, float(max_position_notional_usdc) - current_notional)
+    executed = min(signaled_notional, remaining)
+    skipped = max(0.0, signaled_notional - executed)
+    return executed, skipped
+
+
 def _build_house_positions(
     tape_rows: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    return _build_house_positions_with_cap(tape_rows, max_position_notional_usdc=None)
+
+
+def _build_house_positions_with_cap(
+    tape_rows: list[dict[str, Any]],
+    *,
+    max_position_notional_usdc: float | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     open_positions: dict[str, dict[str, Any]] = {}
     closed_positions: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
+    cap_rows: list[dict[str, Any]] = []
 
     for row in sorted(tape_rows, key=lambda item: item["first_ts"]):
         token_id = row["token_id"]
         action = row["action"]
         wallets = tuple(json.loads(row["supporting_wallets"]))
         current = open_positions.get(token_id)
+        signaled_notional = float(row["total_notional_usdc"] or 0.0)
 
         if action == "open_long":
+            executed_notional, skipped_notional = _capped_notional(
+                signaled_notional,
+                0.0,
+                max_position_notional_usdc,
+            )
+            if executed_notional <= 0:
+                cap_rows.append(
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "action": action,
+                        "reason": "position_cap_reached",
+                        "token_id": token_id,
+                        "market_id": row["market_id"],
+                        "event_title": row["event_title"],
+                        "outcome": row["outcome"],
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
+                continue
             open_positions[token_id] = {
                 "token_id": token_id,
                 "market_id": row["market_id"],
@@ -74,17 +120,72 @@ def _build_house_positions(
                 "raw_trade_count": int(row["trade_count"]),
                 "supporting_wallet_count": int(row["unique_wallet_count"]),
                 "supporting_wallets": set(wallets),
-                "total_signaled_notional_usdc": float(row["total_notional_usdc"] or 0.0),
+                "total_signaled_notional_usdc": signaled_notional,
+                "executed_notional_usdc": executed_notional,
+                "suppressed_notional_usdc": skipped_notional,
                 "avg_open_signal_price": row["avg_signal_price"],
             }
+            if skipped_notional > 0:
+                cap_rows.append(
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "action": action,
+                        "reason": "position_cap_partial_open",
+                        "token_id": token_id,
+                        "market_id": row["market_id"],
+                        "event_title": row["event_title"],
+                        "outcome": row["outcome"],
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
         elif action == "reinforce_long" and current is not None:
+            executed_notional, skipped_notional = _capped_notional(
+                signaled_notional,
+                float(current.get("executed_notional_usdc") or 0.0),
+                max_position_notional_usdc,
+            )
+            if executed_notional <= 0:
+                cap_rows.append(
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "action": action,
+                        "reason": "position_cap_reached",
+                        "token_id": token_id,
+                        "market_id": row["market_id"],
+                        "event_title": row["event_title"],
+                        "outcome": row["outcome"],
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
+                continue
             current["last_signal_at"] = row["last_ts"]
             current["signal_cluster_count"] += 1
             current["reinforcement_count"] += 1
             current["raw_trade_count"] += int(row["trade_count"])
-            current["total_signaled_notional_usdc"] += float(row["total_notional_usdc"] or 0.0)
+            current["total_signaled_notional_usdc"] += signaled_notional
+            current["executed_notional_usdc"] += executed_notional
+            current["suppressed_notional_usdc"] += skipped_notional
             current["supporting_wallets"].update(wallets)
             current["supporting_wallet_count"] = len(current["supporting_wallets"])
+            if skipped_notional > 0:
+                cap_rows.append(
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "action": action,
+                        "reason": "position_cap_partial_reinforce",
+                        "token_id": token_id,
+                        "market_id": row["market_id"],
+                        "event_title": row["event_title"],
+                        "outcome": row["outcome"],
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
         elif action == "close_long" and current is not None:
             current["last_signal_at"] = row["last_ts"]
             current["close_ts"] = row["first_ts"]
@@ -121,7 +222,7 @@ def _build_house_positions(
         row["supporting_wallets"] = json.dumps(sorted(row["supporting_wallets"]))
         closed_rows.append(row)
 
-    return open_rows, closed_rows, conflicts
+    return open_rows, closed_rows, conflicts, cap_rows
 
 
 def run_paper_tracking_model(
@@ -130,6 +231,7 @@ def run_paper_tracking_model(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     cluster_window_hours: int = DEFAULT_CLUSTER_WINDOW_HOURS,
     action_bucket: str | None = DEFAULT_ACTION_BUCKET,
+    max_position_notional_usdc: float | None = None,
 ) -> dict[str, Any]:
     output_root = Path(output_dir)
     consolidated = run_manual_seed_consolidation(
@@ -141,7 +243,10 @@ def run_paper_tracking_model(
     )
 
     tape_rows = consolidated["house_tape"]
-    open_rows, closed_rows, conflict_rows = _build_house_positions(tape_rows)
+    open_rows, closed_rows, conflict_rows, cap_rows = _build_house_positions_with_cap(
+        tape_rows,
+        max_position_notional_usdc=max_position_notional_usdc,
+    )
 
     position_fields = [
         "token_id",
@@ -160,6 +265,8 @@ def run_paper_tracking_model(
         "supporting_wallet_count",
         "supporting_wallets",
         "total_signaled_notional_usdc",
+        "executed_notional_usdc",
+        "suppressed_notional_usdc",
         "avg_open_signal_price",
     ]
     conflict_fields = [
@@ -174,16 +281,30 @@ def run_paper_tracking_model(
         "supporting_wallets",
         "total_notional_usdc",
     ]
+    cap_fields = [
+        "cluster_id",
+        "action",
+        "reason",
+        "token_id",
+        "market_id",
+        "event_title",
+        "outcome",
+        "signaled_notional_usdc",
+        "executed_notional_usdc",
+        "skipped_notional_usdc",
+    ]
 
     open_path = _write_csv(output_root / "current_house_positions.csv", open_rows, fieldnames=position_fields)
     closed_path = _write_csv(output_root / "closed_house_positions.csv", closed_rows, fieldnames=position_fields)
     conflict_path = _write_csv(output_root / "skipped_market_conflicts.csv", conflict_rows, fieldnames=conflict_fields)
+    cap_path = _write_csv(output_root / "skipped_position_cap_records.csv", cap_rows, fieldnames=cap_fields)
 
     raw_trade_count = len(consolidated["trades"])
     tape_count = len(tape_rows)
     open_count = len(open_rows)
     closed_count = len(closed_rows)
     conflict_count = len(conflict_rows)
+    cap_skip_count = len(cap_rows)
     reinforce_count = sum(1 for row in tape_rows if row["action"] == "reinforce_long")
     open_action_count = sum(1 for row in tape_rows if row["action"] == "open_long")
     duplicate_absorbed = max(0, raw_trade_count - open_action_count - reinforce_count - conflict_count)
@@ -205,6 +326,12 @@ def run_paper_tracking_model(
         f"- Closed house positions: `{closed_count}`\n",
         f"- Reinforcement actions: `{reinforce_count}`\n",
         f"- Market-conflict actions skipped: `{conflict_count}`\n",
+        f"- Position-cap skip / partial-fill records: `{cap_skip_count}`\n",
+        (
+            f"- Per-position notional cap: `{max_position_notional_usdc:.2f} USDC`\n"
+            if max_position_notional_usdc is not None
+            else ""
+        ),
         f"- Average supporting wallets per open house position: `{avg_wallet_support:.2f}`\n",
         f"- Approximate duplicate signal absorption count: `{duplicate_absorbed}`\n",
         "\n",
@@ -212,6 +339,7 @@ def run_paper_tracking_model(
         "- `current_house_positions.csv` is the file to monitor going forward.\n",
         "- `closed_house_positions.csv` shows where the unified house tape would have exited based on source wallet sells.\n",
         "- `skipped_market_conflicts.csv` shows signals ignored because another wallet wanted the opposite outcome in a market where the house was already exposed.\n",
+        "- `skipped_position_cap_records.csv` shows signals that were fully blocked or partially clipped by the per-position cap.\n",
         "- Reinforcements are recorded, but they do not automatically open a second independent position.\n",
     ]
 
@@ -226,5 +354,6 @@ def run_paper_tracking_model(
         "open_path": open_path,
         "closed_path": closed_path,
         "conflict_path": conflict_path,
+        "cap_path": cap_path,
         "consolidated": consolidated,
     }

@@ -43,7 +43,29 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+def _capped_notional(
+    signaled_notional: float,
+    current_notional: float,
+    max_position_notional_usdc: float | None,
+) -> tuple[float, float]:
+    if max_position_notional_usdc is None:
+        return signaled_notional, 0.0
+    remaining = max(0.0, float(max_position_notional_usdc) - current_notional)
+    executed = min(signaled_notional, remaining)
+    skipped = max(0.0, signaled_notional - executed)
+    return executed, skipped
+
+
 def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Reconstruct weighted-cost house positions from the consolidated signal tape."""
+    return _build_house_position_ledger_with_cap(tape, max_position_notional_usdc=None)
+
+
+def _build_house_position_ledger_with_cap(
+    tape: pd.DataFrame,
+    *,
+    max_position_notional_usdc: float | None,
+) -> tuple[tuple[pd.DataFrame, pd.DataFrame], pd.DataFrame]:
     """Reconstruct weighted-cost house positions from the consolidated signal tape."""
 
     if tape.empty:
@@ -70,23 +92,36 @@ def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
         action = str(row.get("action") or "")
         token_id = str(row.get("token_id") or "")
         price = row.get("avg_signal_price")
-        notional = float(row.get("total_notional_usdc") or 0.0)
+        signaled_notional = float(row.get("total_notional_usdc") or 0.0)
         contracts = None
         if price is not None and pd.notna(price) and float(price) > 0:
-            contracts = notional / float(price)
+            contracts = signaled_notional / float(price)
         support_wallets = set(json.loads(row.get("supporting_wallets") or "[]"))
 
         if action == "open_long":
-            if contracts is None or contracts <= 0:
+            executed_notional, skipped_notional = _capped_notional(
+                signaled_notional,
+                0.0,
+                max_position_notional_usdc,
+            )
+            executed_contracts = (
+                None
+                if contracts is None or signaled_notional <= 0
+                else contracts * (executed_notional / signaled_notional)
+            )
+            if executed_contracts is None or executed_contracts <= 0:
                 skipped_rows.append(
                     {
                         "cluster_id": row.get("cluster_id"),
                         "action": action,
-                        "reason": "missing_open_price",
+                        "reason": "missing_open_price" if contracts is None else "position_cap_reached",
                         "token_id": token_id,
                         "market_id": row.get("market_id"),
                         "event_title": row.get("event_title"),
                         "outcome": row.get("outcome"),
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
                     }
                 )
                 continue
@@ -110,36 +145,72 @@ def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
                 "raw_trade_count": int(row.get("trade_count") or 0),
                 "supporting_wallet_count": len(support_wallets),
                 "supporting_wallets": support_wallets,
-                "entry_contracts": float(contracts),
-                "entry_notional_usdc": notional,
+                "entry_contracts": float(executed_contracts),
+                "entry_notional_usdc": executed_notional,
+                "signaled_notional_usdc": signaled_notional,
+                "suppressed_notional_usdc": skipped_notional,
                 "weighted_avg_entry_price": float(price),
-                "entry_cost_total_usdc": entry_cost_unit * float(contracts),
+                "entry_cost_total_usdc": entry_cost_unit * float(executed_contracts),
             }
-        elif action == "reinforce_long":
-            current = open_positions.get(token_id)
-            if current is None or contracts is None or contracts <= 0:
+            if skipped_notional > 0:
                 skipped_rows.append(
                     {
                         "cluster_id": row.get("cluster_id"),
                         "action": action,
-                        "reason": "missing_parent_or_price",
+                        "reason": "position_cap_partial_open",
                         "token_id": token_id,
                         "market_id": row.get("market_id"),
                         "event_title": row.get("event_title"),
                         "outcome": row.get("outcome"),
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
+        elif action == "reinforce_long":
+            current = open_positions.get(token_id)
+            executed_notional, skipped_notional = _capped_notional(
+                signaled_notional,
+                float(current.get("entry_notional_usdc") or 0.0) if current is not None else 0.0,
+                max_position_notional_usdc,
+            )
+            executed_contracts = (
+                None
+                if contracts is None or signaled_notional <= 0
+                else contracts * (executed_notional / signaled_notional)
+            )
+            if current is None or executed_contracts is None or executed_contracts <= 0:
+                skipped_rows.append(
+                    {
+                        "cluster_id": row.get("cluster_id"),
+                        "action": action,
+                        "reason": (
+                            "missing_parent_or_price"
+                            if current is None or contracts is None
+                            else "position_cap_reached"
+                        ),
+                        "token_id": token_id,
+                        "market_id": row.get("market_id"),
+                        "event_title": row.get("event_title"),
+                        "outcome": row.get("outcome"),
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
                     }
                 )
                 continue
             entry_cost_unit = float(
                 estimate_entry_only_cost(pd.Series(row), entry_price=float(price))["total_cost"]
             )
-            total_contracts = float(current["entry_contracts"]) + float(contracts)
-            total_notional = float(current["entry_notional_usdc"]) + notional
+            total_contracts = float(current["entry_contracts"]) + float(executed_contracts)
+            total_notional = float(current["entry_notional_usdc"]) + executed_notional
             current["entry_contracts"] = total_contracts
             current["entry_notional_usdc"] = total_notional
+            current["signaled_notional_usdc"] = float(current.get("signaled_notional_usdc") or 0.0) + signaled_notional
+            current["suppressed_notional_usdc"] = float(current.get("suppressed_notional_usdc") or 0.0) + skipped_notional
             current["weighted_avg_entry_price"] = total_notional / total_contracts if total_contracts > 0 else None
             current["entry_cost_total_usdc"] = float(current["entry_cost_total_usdc"]) + (
-                entry_cost_unit * float(contracts)
+                entry_cost_unit * float(executed_contracts)
             )
             current["last_signal_at"] = row["last_ts"]
             current["signal_cluster_count"] = int(current["signal_cluster_count"]) + 1
@@ -147,6 +218,21 @@ def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
             current["raw_trade_count"] = int(current["raw_trade_count"]) + int(row.get("trade_count") or 0)
             current["supporting_wallets"].update(support_wallets)
             current["supporting_wallet_count"] = len(current["supporting_wallets"])
+            if skipped_notional > 0:
+                skipped_rows.append(
+                    {
+                        "cluster_id": row.get("cluster_id"),
+                        "action": action,
+                        "reason": "position_cap_partial_reinforce",
+                        "token_id": token_id,
+                        "market_id": row.get("market_id"),
+                        "event_title": row.get("event_title"),
+                        "outcome": row.get("outcome"),
+                        "signaled_notional_usdc": signaled_notional,
+                        "executed_notional_usdc": executed_notional,
+                        "skipped_notional_usdc": skipped_notional,
+                    }
+                )
         elif action == "close_long":
             current = open_positions.get(token_id)
             if current is None or price is None or pd.isna(price):
@@ -202,7 +288,18 @@ def _build_house_position_ledger(tape: pd.DataFrame) -> tuple[pd.DataFrame, pd.D
         skipped = skipped.sort_values(["cluster_id"]).reset_index(drop=True)
     else:
         skipped = pd.DataFrame(
-            columns=["cluster_id", "action", "reason", "token_id", "market_id", "event_title", "outcome"]
+            columns=[
+                "cluster_id",
+                "action",
+                "reason",
+                "token_id",
+                "market_id",
+                "event_title",
+                "outcome",
+                "signaled_notional_usdc",
+                "executed_notional_usdc",
+                "skipped_notional_usdc",
+            ]
         )
 
     open_frame = pd.DataFrame.from_records(open_rows)
@@ -380,15 +477,36 @@ def _build_daily_equity_curve(
 def _plot_equity_curve(curve: pd.DataFrame, path: Path) -> Path | None:
     if curve.empty:
         return None
-    figure, axis = plt.subplots(figsize=(10, 5))
-    axis.plot(curve["date"], curve["combined_equity_net_usdc"], label="Combined Equity", linewidth=2.0)
-    axis.plot(curve["date"], curve["cumulative_realized_net_usdc"], label="Realized Only", linewidth=1.4)
-    axis.set_title("Unified House Portfolio Equity Curve")
-    axis.set_ylabel("Net PnL (USDC)")
-    axis.set_xlabel("Date")
-    axis.legend()
-    axis.grid(alpha=0.25)
-    figure.autofmt_xdate()
+    x_positions = list(range(len(curve)))
+    labels = curve["date"].astype(str).tolist()
+
+    plt.style.use("default")
+    figure, axis = plt.subplots(figsize=(16, 9))
+    figure.patch.set_facecolor("white")
+    axis.set_facecolor("#EAEAF2")
+    axis.plot(
+        x_positions,
+        curve["combined_equity_net_usdc"],
+        label="Combined Equity",
+        linewidth=3.0,
+        color="#1f77b4",
+    )
+    axis.plot(
+        x_positions,
+        curve["cumulative_realized_net_usdc"],
+        label="Realized Only",
+        linewidth=2.2,
+        color="#ff7f0e",
+    )
+    axis.set_title("Unified House Portfolio Equity Curve", fontsize=24, pad=12)
+    axis.set_ylabel("Net PnL (USDC)", fontsize=20)
+    axis.set_xlabel("Date", fontsize=20)
+    axis.tick_params(axis="y", labelsize=16)
+    axis.set_xticks(x_positions)
+    axis.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    axis.legend(loc="upper left", fontsize=20, framealpha=0.85)
+    axis.grid(axis="y", alpha=0.35, linewidth=1.0)
+    axis.grid(axis="x", alpha=0.8, linewidth=0.8, color="white")
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout()
     figure.savefig(path, dpi=160)
@@ -401,6 +519,7 @@ def run_paper_tracking_performance(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     *,
     analysis_cutoff: str | None = None,
+    max_position_notional_usdc: float | None = None,
 ) -> dict[str, Any]:
     consolidated_root = Path(consolidated_dir)
     output_root = Path(output_dir)
@@ -409,7 +528,10 @@ def run_paper_tracking_performance(
     if tape.empty:
         raise ValueError("house_signal_tape.csv is required to build performance tracking")
 
-    (open_positions, closed_positions), skipped = _build_house_position_ledger(tape)
+    (open_positions, closed_positions), skipped = _build_house_position_ledger_with_cap(
+        tape,
+        max_position_notional_usdc=max_position_notional_usdc,
+    )
     cutoff = pd.to_datetime(analysis_cutoff, utc=True, errors="coerce")
     if cutoff is None or pd.isna(cutoff):
         cutoff = pd.Timestamp.now(tz="UTC")
@@ -466,6 +588,11 @@ def run_paper_tracking_performance(
         f"- Open house positions: `{total_open}`\n",
         f"- Closed house positions: `{total_closed}`\n",
         f"- Skipped / unpriceable ledger records: `{skipped_count}`\n",
+        (
+            f"- Per-position notional cap: `{max_position_notional_usdc:.2f} USDC`\n"
+            if max_position_notional_usdc is not None
+            else ""
+        ),
         f"- Closed-position realized net PnL: `{realized_total:.2f} USDC`\n",
         f"- Open-position MTM net PnL: `{open_mtm_total:.2f} USDC`\n",
         f"- Combined house portfolio net PnL: `{combined_total:.2f} USDC`\n",

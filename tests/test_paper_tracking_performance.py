@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from research.paper_tracking_performance import _build_house_position_ledger
+from research.paper_tracking_performance import _build_house_position_ledger, _build_house_position_ledger_with_cap
 
 
 def test_build_house_position_ledger_weights_reinforcements() -> None:
@@ -70,3 +70,56 @@ def test_build_house_position_ledger_weights_reinforcements() -> None:
     assert round(float(row["entry_contracts"]), 6) == 280.0
     assert round(float(row["weighted_avg_entry_price"]), 6) == round(160.0 / 280.0, 6)
     assert float(row["realized_pnl_raw_usdc"]) > 0
+
+
+def test_build_house_position_ledger_respects_position_cap() -> None:
+    tape = pd.DataFrame.from_records(
+        [
+            {
+                "cluster_id": "buy1",
+                "action": "open_long",
+                "side": "BUY",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event",
+                "outcome": "Yes",
+                "first_ts": "2026-01-01T00:00:00+00:00",
+                "last_ts": "2026-01-01T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xaaa"]',
+                "total_notional_usdc": 80.0,
+                "avg_signal_price": 0.5,
+            },
+            {
+                "cluster_id": "buy2",
+                "action": "reinforce_long",
+                "side": "BUY",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event",
+                "outcome": "Yes",
+                "first_ts": "2026-01-02T00:00:00+00:00",
+                "last_ts": "2026-01-02T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xbbb"]',
+                "total_notional_usdc": 50.0,
+                "avg_signal_price": 0.5,
+            },
+        ]
+    )
+
+    (open_positions, closed_positions), skipped = _build_house_position_ledger_with_cap(
+        tape,
+        max_position_notional_usdc=100.0,
+    )
+
+    assert closed_positions.empty
+    assert len(open_positions) == 1
+    row = open_positions.iloc[0]
+    assert float(row["entry_notional_usdc"]) == 100.0
+    assert float(row["signaled_notional_usdc"]) == 130.0
+    assert float(row["suppressed_notional_usdc"]) == 30.0
+    assert len(skipped) == 1
+    assert skipped.iloc[0]["reason"] == "position_cap_partial_reinforce"

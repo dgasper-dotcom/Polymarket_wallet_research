@@ -35,18 +35,26 @@ def main() -> None:
         default="copy_ready",
         help="Filter wallet csv rows by action_bucket. Use empty string for all rows.",
     )
+    parser.add_argument(
+        "--max-position-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on cumulative house notional per token.",
+    )
     args = parser.parse_args()
 
     result = run_paper_tracking_model(
         output_dir=Path(args.output_dir),
         cluster_window_hours=args.cluster_window_hours,
         action_bucket=args.action_bucket or None,
+        max_position_notional_usdc=args.max_position_notional_usdc,
     )
 
     print(result["summary_path"])
     print(result["open_path"])
     print(result["closed_path"])
     print(result["conflict_path"])
+    print(result["cap_path"])
 
 
 if __name__ == "__main__":
