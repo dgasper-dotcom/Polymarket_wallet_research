@@ -76,6 +76,7 @@ def _build_house_positions_with_cap(
     max_position_notional_usdc: float | None,
     max_event_notional_usdc: float | None = None,
     max_wallet_open_notional_usdc: float | None = None,
+    max_total_open_notional_usdc: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     open_positions: dict[str, dict[str, Any]] = {}
     closed_positions: list[dict[str, Any]] = []
@@ -83,6 +84,7 @@ def _build_house_positions_with_cap(
     cap_rows: list[dict[str, Any]] = []
     event_open_notional: dict[str, float] = {}
     wallet_open_notional: dict[str, float] = {}
+    total_open_notional = 0.0
 
     for row in sorted(tape_rows, key=lambda item: item["first_ts"]):
         token_id = row["token_id"]
@@ -97,11 +99,13 @@ def _build_house_positions_with_cap(
                 signaled_notional=signaled_notional,
                 current_position_notional=0.0,
                 current_event_notional=event_open_notional.get(event_key, 0.0),
+                current_total_open_notional=total_open_notional,
                 supporting_wallets=wallets,
                 wallet_open_notional=wallet_open_notional,
                 max_position_notional_usdc=max_position_notional_usdc,
                 max_event_notional_usdc=max_event_notional_usdc,
                 max_wallet_open_notional_usdc=max_wallet_open_notional_usdc,
+                max_total_open_notional_usdc=max_total_open_notional_usdc,
             )
             if executed_notional <= 0:
                 reason = "position_cap_reached"
@@ -109,6 +113,8 @@ def _build_house_positions_with_cap(
                     reason = "event_cap_reached"
                 elif "wallet_cap" in binding_caps:
                     reason = "wallet_cap_reached"
+                elif "book_cap" in binding_caps:
+                    reason = "book_cap_reached"
                 cap_rows.append(
                     {
                         "cluster_id": row["cluster_id"],
@@ -127,6 +133,7 @@ def _build_house_positions_with_cap(
                 continue
             wallet_attribution = apply_wallet_open_notional_delta(wallet_open_notional, wallets, executed_notional)
             event_open_notional[event_key] = float(event_open_notional.get(event_key, 0.0)) + executed_notional
+            total_open_notional += executed_notional
             open_positions[token_id] = {
                 "token_id": token_id,
                 "market_id": row["market_id"],
@@ -155,6 +162,8 @@ def _build_house_positions_with_cap(
                     reason = "event_cap_partial_open"
                 elif "wallet_cap" in binding_caps:
                     reason = "wallet_cap_partial_open"
+                elif "book_cap" in binding_caps:
+                    reason = "book_cap_partial_open"
                 cap_rows.append(
                     {
                         "cluster_id": row["cluster_id"],
@@ -175,11 +184,13 @@ def _build_house_positions_with_cap(
                 signaled_notional=signaled_notional,
                 current_position_notional=float(current.get("executed_notional_usdc") or 0.0),
                 current_event_notional=event_open_notional.get(event_key, 0.0),
+                current_total_open_notional=total_open_notional,
                 supporting_wallets=wallets,
                 wallet_open_notional=wallet_open_notional,
                 max_position_notional_usdc=max_position_notional_usdc,
                 max_event_notional_usdc=max_event_notional_usdc,
                 max_wallet_open_notional_usdc=max_wallet_open_notional_usdc,
+                max_total_open_notional_usdc=max_total_open_notional_usdc,
             )
             if executed_notional <= 0:
                 reason = "position_cap_reached"
@@ -187,6 +198,8 @@ def _build_house_positions_with_cap(
                     reason = "event_cap_reached"
                 elif "wallet_cap" in binding_caps:
                     reason = "wallet_cap_reached"
+                elif "book_cap" in binding_caps:
+                    reason = "book_cap_reached"
                 cap_rows.append(
                     {
                         "cluster_id": row["cluster_id"],
@@ -218,12 +231,15 @@ def _build_house_positions_with_cap(
                 current_wallet_attribution[wallet] = float(current_wallet_attribution.get(wallet, 0.0)) + value
             current["wallet_notional_attribution"] = current_wallet_attribution
             event_open_notional[event_key] = float(event_open_notional.get(event_key, 0.0)) + executed_notional
+            total_open_notional += executed_notional
             if skipped_notional > 0:
                 reason = "position_cap_partial_reinforce"
                 if "event_cap" in binding_caps:
                     reason = "event_cap_partial_reinforce"
                 elif "wallet_cap" in binding_caps:
                     reason = "wallet_cap_partial_reinforce"
+                elif "book_cap" in binding_caps:
+                    reason = "book_cap_partial_reinforce"
                 cap_rows.append(
                     {
                         "cluster_id": row["cluster_id"],
@@ -253,6 +269,10 @@ def _build_house_positions_with_cap(
             if event_open_notional[event_key] <= 1e-9:
                 event_open_notional.pop(event_key, None)
             release_wallet_open_notional(wallet_open_notional, current.get("wallet_notional_attribution"))
+            total_open_notional = max(
+                0.0,
+                total_open_notional - float(current.get("executed_notional_usdc") or 0.0),
+            )
             current["supporting_wallets"] = tuple(sorted(current["supporting_wallets"]))
             closed_positions.append(current)
             del open_positions[token_id]
@@ -300,6 +320,7 @@ def run_paper_tracking_model(
     max_position_notional_usdc: float | None = None,
     max_event_notional_usdc: float | None = None,
     max_wallet_open_notional_usdc: float | None = None,
+    max_total_open_notional_usdc: float | None = None,
 ) -> dict[str, Any]:
     output_root = Path(output_dir)
     consolidated = run_manual_seed_consolidation(
@@ -316,6 +337,7 @@ def run_paper_tracking_model(
         max_position_notional_usdc=max_position_notional_usdc,
         max_event_notional_usdc=max_event_notional_usdc,
         max_wallet_open_notional_usdc=max_wallet_open_notional_usdc,
+        max_total_open_notional_usdc=max_total_open_notional_usdc,
     )
 
     position_fields = [
@@ -412,6 +434,11 @@ def run_paper_tracking_model(
         (
             f"- Per-wallet open-notional cap: `{max_wallet_open_notional_usdc:.2f} USDC`\n"
             if max_wallet_open_notional_usdc is not None
+            else ""
+        ),
+        (
+            f"- Total concurrent house-notional cap: `{max_total_open_notional_usdc:.2f} USDC`\n"
+            if max_total_open_notional_usdc is not None
             else ""
         ),
         f"- Average supporting wallets per open house position: `{avg_wallet_support:.2f}`\n",

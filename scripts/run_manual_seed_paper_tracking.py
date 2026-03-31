@@ -53,6 +53,12 @@ def main() -> None:
         default=None,
         help="Optional hard cap on wallet-attributed open notional across the house book.",
     )
+    parser.add_argument(
+        "--max-total-open-notional-usdc",
+        type=float,
+        default=None,
+        help="Optional hard cap on total concurrent open house notional across the whole portfolio.",
+    )
     args = parser.parse_args()
 
     result = run_paper_tracking_model(
@@ -62,6 +68,7 @@ def main() -> None:
         max_position_notional_usdc=args.max_position_notional_usdc,
         max_event_notional_usdc=args.max_event_notional_usdc,
         max_wallet_open_notional_usdc=args.max_wallet_open_notional_usdc,
+        max_total_open_notional_usdc=args.max_total_open_notional_usdc,
     )
 
     print(result["summary_path"])

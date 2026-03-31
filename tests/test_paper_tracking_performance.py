@@ -129,6 +129,59 @@ def test_build_house_position_ledger_respects_position_cap() -> None:
     assert skipped.iloc[0]["reason"] == "position_cap_partial_reinforce"
 
 
+def test_build_house_position_ledger_respects_total_open_cap() -> None:
+    tape = pd.DataFrame.from_records(
+        [
+            {
+                "cluster_id": "buy1",
+                "action": "open_long",
+                "side": "BUY",
+                "token_id": "t1",
+                "market_id": "m1",
+                "event_title": "Event 1",
+                "outcome": "Yes",
+                "first_ts": "2026-01-01T00:00:00+00:00",
+                "last_ts": "2026-01-01T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xaaa"]',
+                "total_notional_usdc": 80.0,
+                "avg_signal_price": 0.5,
+            },
+            {
+                "cluster_id": "buy2",
+                "action": "open_long",
+                "side": "BUY",
+                "token_id": "t2",
+                "market_id": "m2",
+                "event_title": "Event 2",
+                "outcome": "No",
+                "first_ts": "2026-01-02T00:00:00+00:00",
+                "last_ts": "2026-01-02T00:00:00+00:00",
+                "trade_count": 1,
+                "unique_wallet_count": 1,
+                "supporting_wallets": '["0xbbb"]',
+                "total_notional_usdc": 50.0,
+                "avg_signal_price": 0.5,
+            },
+        ]
+    )
+
+    (open_positions, closed_positions), skipped = _build_house_position_ledger_with_cap(
+        tape,
+        max_position_notional_usdc=None,
+        max_total_open_notional_usdc=100.0,
+    )
+
+    assert closed_positions.empty
+    assert len(open_positions) == 2
+    assert float(open_positions.loc[open_positions["token_id"] == "t1", "entry_notional_usdc"].iloc[0]) == 80.0
+    assert float(open_positions.loc[open_positions["token_id"] == "t2", "entry_notional_usdc"].iloc[0]) == 20.0
+    assert len(skipped) == 1
+    assert skipped.iloc[0]["reason"] == "book_cap_partial_open"
+    assert float(skipped.iloc[0]["skipped_notional_usdc"]) == 30.0
+
+
 def test_build_contribution_tables_treats_missing_mtm_as_zero() -> None:
     closed_positions = pd.DataFrame.from_records(
         [

@@ -12,11 +12,13 @@ def allowed_house_notional(
     signaled_notional: float,
     current_position_notional: float,
     current_event_notional: float,
+    current_total_open_notional: float,
     supporting_wallets: Iterable[str],
     wallet_open_notional: dict[str, float],
     max_position_notional_usdc: float | None,
     max_event_notional_usdc: float | None,
     max_wallet_open_notional_usdc: float | None,
+    max_total_open_notional_usdc: float | None,
 ) -> tuple[float, float, list[str]]:
     """Return executed/skipped notional plus the binding cap names.
 
@@ -41,6 +43,14 @@ def allowed_house_notional(
             (
                 "event_cap",
                 max(0.0, float(max_event_notional_usdc) - float(current_event_notional or 0.0)),
+            )
+        )
+
+    if max_total_open_notional_usdc is not None:
+        limits.append(
+            (
+                "book_cap",
+                max(0.0, float(max_total_open_notional_usdc) - float(current_total_open_notional or 0.0)),
             )
         )
 
