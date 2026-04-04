@@ -40,6 +40,21 @@ python3 scripts/run_forward_paper_cycle.py \
   --skip-refresh
 ```
 
+## Weekly Check Command
+
+```bash
+cd /Users/davidgasper/Downloads/polymarket_wallet_research
+python3 scripts/run_weekly_wallet_check.py \
+  --config configs/forward_paper_30d_core4.json
+```
+
+This one command will:
+- fetch fresh PMA trades for the full 8-wallet watchlist
+- remap them into public Gamma/CLOB markets
+- replay the 4-wallet unified house book
+- compare the refreshed book to the baseline snapshot in the config
+- write a weekly summary plus wallet-activity CSVs
+
 ## Outputs To Watch
 
 - `exports/forward_paper_30d_core4/current_house_positions.csv`
